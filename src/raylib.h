@@ -424,6 +424,8 @@ typedef struct ModelAnimation {
     BoneInfo *bones;        // Bones information (skeleton)
     Transform **framePoses; // Poses array by frame
     char name[32];          // Animation name
+    bool localPosesExists;  // Whether or not local poses have been allocated // CUSTOM
+    Transform **localPoses; // Local poses array  by frame
 } ModelAnimation;
 
 // Ray, ray for raycasting
@@ -1718,6 +1720,24 @@ RLAPI void DetachAudioStreamProcessor(AudioStream stream, AudioCallback processo
 
 RLAPI void AttachAudioMixedProcessor(AudioCallback processor); // Attach audio stream processor to the entire audio pipeline, receives frames x 2 samples as 'float' (stereo)
 RLAPI void DetachAudioMixedProcessor(AudioCallback processor); // Detach audio stream processor from the entire audio pipeline
+
+// Advanced Pose Manipulation
+typedef struct Pose {
+    int count; // Number of poses
+    Transform *localSpaceTransforms; // local space transforms
+    Transform *modelSpaceTransforms; // model space transforms
+} Pose;
+
+RLAPI Pose LoadPose(int boneCount);
+RLAPI void UnloadPose(Pose pose);
+RLAPI void GetBindPose(const Model model, Pose *outPose);
+RLAPI Pose LoadBindPose(const Model model);
+RLAPI void GetPoseAtFrame(const ModelAnimation anim, int frame, Pose *outPose);
+RLAPI void GetLocalPoseAtFrame(const ModelAnimation anim, int frame, Pose *outPose);
+RLAPI void PoseToModelSpace(Model model, Pose *pose);
+RLAPI void SetModelPose(Model model, Pose *inPose);
+RLAPI Transform ComposeTransform(Transform transform, Transform parentTransform);
+RLAPI Transform ComposeTransformInverse(Transform transform, Transform parentTransform);
 
 #if defined(__cplusplus)
 }

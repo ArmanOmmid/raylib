@@ -2269,7 +2269,267 @@ ModelAnimation *LoadModelAnimations(const char *fileName, int *animCount)
     if (IsFileExtension(fileName, ".gltf;.glb")) animations = LoadModelAnimationsGLTF(fileName, animCount);
 #endif
 
+    // Set enable for local pose cache (supported for GLTF only)
+    if (animations)
+    {
+        bool localPosesExists = IsFileExtension(fileName, ".gltf;.glb");
+        for (int i = 0; i < *animCount; i++)
+        {
+            animations[i].localPosesExists = localPosesExists;
+        }
+    }
+
     return animations;
+}
+
+Matrix MatrixFromTransform(Transform t)
+{
+    Matrix m = MatrixIdentity();
+    m = MatrixMultiply(m, QuaternionToMatrix(t.rotation));
+    m = MatrixMultiply(m, MatrixScale(t.scale.x, t.scale.y, t.scale.z));
+    m = MatrixMultiply(m, MatrixTranslate(t.translation.x, t.translation.y, t.translation.z));
+    return m;
+}
+
+Transform ComposeTransform(Transform transform, Transform parentTransform)
+{
+    // Composed Model Space Transforms
+    transform.rotation = QuaternionMultiply(parentTransform.rotation, transform.rotation);
+    transform.scale = Vector3Multiply(transform.scale, parentTransform.scale);
+
+    transform.translation = Vector3Multiply(transform.translation, parentTransform.scale);
+    transform.translation = Vector3RotateByQuaternion(transform.translation, parentTransform.rotation);
+    transform.translation = Vector3Add(transform.translation, parentTransform.translation);
+    return transform;
+}
+
+Transform ComposeTransformInverse(Transform transform, Transform parentTransform)
+{
+    // Extracts Local Space Transforms
+    transform.rotation = QuaternionMultiply(QuaternionInvert(parentTransform.rotation), transform.rotation);
+    transform.scale = Vector3Divide(transform.scale, parentTransform.scale);
+
+    transform.translation = Vector3Subtract(transform.translation, parentTransform.translation);
+    transform.translation = Vector3RotateByQuaternion(transform.translation, QuaternionInvert(parentTransform.rotation));
+    transform.translation = Vector3Divide(transform.translation, parentTransform.scale);
+    return transform;
+}
+
+Transform TransformModelSpace(const BoneInfo *boneInfos, Transform *localPoses, int boneId)
+{
+    Transform t = {
+        .translation = {0.0f, 0.0f, 0.0f},
+        .rotation = {0.0f, 0.0f, 0.0f, 1.0f},
+        .scale = {1.0f, 1.0f, 1.0f},
+    };
+    while (boneId != -1)
+    {
+        t = ComposeTransform(t, localPoses[boneId]);
+        boneId = boneInfos[boneId].parent;
+    }
+    return t;
+}
+
+Vector3 VertexTransform(Vector3 vertex, Transform transform)
+{
+    vertex = Vector3Multiply(vertex, transform.scale);
+    vertex = Vector3RotateByQuaternion(vertex, transform.rotation);
+    vertex = Vector3Add(vertex, transform.translation);
+    return vertex;
+}
+
+Vector3 VertexTransformInverse(Vector3 vertex, Transform transform)
+{
+    vertex = Vector3Subtract(vertex, transform.translation);
+    vertex = Vector3RotateByQuaternion(vertex, QuaternionInvert(transform.rotation));
+    vertex = Vector3Divide(vertex, transform.scale);
+    return vertex;
+}
+
+Vector3 VertexModelSpace(const BoneInfo* boneInfos, Transform *localPoses, int boneId, Vector3 vertex)
+{
+    while (boneId != -1) 
+    {
+        vertex = VertexTransform(vertex, localPoses[boneId]);
+        boneId = boneInfos[boneId].parent;
+    }
+    return vertex;
+}
+
+Pose LoadPose(int boneCount)
+{
+    return (Pose) {
+        .count = boneCount,
+        .localSpaceTransforms = (Transform*)RL_CALLOC(boneCount, sizeof(Transform)),
+        .modelSpaceTransforms = (Transform*)RL_CALLOC(boneCount, sizeof(Transform)),
+    };
+}
+
+void UnloadPose(Pose pose)
+{
+    RL_FREE(pose.localSpaceTransforms);
+    RL_FREE(pose.modelSpaceTransforms);
+}
+
+void GetBindPose(const Model model, Pose *outPose)
+{
+    for (int i = 0; i < model.boneCount; i++)
+    {
+        outPose->localSpaceTransforms[i] = (Transform){ 0 }; // Empty
+        outPose->modelSpaceTransforms[i] = model.bindPose[i]; // Bind Pose
+    }
+}
+
+Pose LoadBindPose(const Model model)
+{
+    Pose pose = LoadPose(model.boneCount);
+    GetBindPose(model, &pose);
+    return pose;
+}
+
+void GetPoseAtFrame(const ModelAnimation anim, int frame, Pose *outPose)
+{
+    if (!((anim.frameCount > 0) && (anim.bones != NULL) && (anim.framePoses != NULL))) return;
+    if (frame >= anim.frameCount) frame = frame % anim.frameCount;
+
+    for (int i = 0; i < anim.boneCount; i++) 
+    {
+        if (!anim.localPosesExists) 
+        {
+            outPose->localSpaceTransforms[i] = (Transform){ 0 }; // Empty
+            outPose->modelSpaceTransforms[i] = anim.framePoses[frame][i]; // Static Model Space Pose if localPoses are not allocated.
+        }
+        else
+        {
+            outPose->localSpaceTransforms[i] = anim.localPoses[frame][i];
+
+            if (i == 0) 
+            {
+                outPose->modelSpaceTransforms[i] = outPose->localSpaceTransforms[i];
+            }
+            else 
+            {
+                outPose->modelSpaceTransforms[i] = ComposeTransform(outPose->localSpaceTransforms[i], outPose->modelSpaceTransforms[anim.bones[i].parent]);
+            }
+        }
+    }
+}
+
+void GetLocalPoseAtFrame(const ModelAnimation anim, int frame, Pose *outPose)
+{
+    if (!((anim.frameCount > 0) && (anim.bones != NULL) && (anim.framePoses != NULL))) return;
+    if (frame >= anim.frameCount) frame = frame % anim.frameCount;
+
+    if (!anim.localPosesExists) return;
+    for (int i = 0; i < anim.boneCount; i++) 
+    {
+        outPose->localSpaceTransforms[i] = anim.localPoses[frame][i];
+    }
+}
+
+void PoseToModelSpace(Model model, Pose *pose)
+{
+    for (int i = 0; i < pose->count; i++)
+    {
+        if (i == 0) 
+        {
+            pose->modelSpaceTransforms[i] = pose->localSpaceTransforms[i];
+        }
+        else 
+        {
+            pose->modelSpaceTransforms[i] = ComposeTransform(pose->localSpaceTransforms[i], pose->modelSpaceTransforms[model.bones[i].parent]);
+        }
+    }
+}
+
+void SetModelPose(Model model, Pose *inPose)
+{
+
+    for (int m = 0; m < model.meshCount; m++)
+    {
+        Mesh mesh = model.meshes[m];
+
+        if (mesh.boneIds == NULL || mesh.boneWeights == NULL)
+        {
+            TRACELOG(LOG_WARNING, "MODEL: UpdateModelAnimation(): Mesh %i has no connection to bones", m);
+            continue;
+        }
+
+        bool updated = false;           // Flag to check when anim vertex information is updated
+        Vector3 newVertex = { 0 };
+        Vector3 newNormal = { 0 };
+
+        Transform bindTransform = { 0 };
+        Transform newTransform = { 0 };
+
+        int boneId = 0;
+        int boneCounter = 0;
+        float boneWeight = 0.0;
+
+        const int vValues = mesh.vertexCount * 3;
+        for (int vCounter = 0; vCounter < vValues; vCounter += 3)
+        {
+            mesh.animVertices[vCounter] = 0;
+            mesh.animVertices[vCounter + 1] = 0;
+            mesh.animVertices[vCounter + 2] = 0;
+
+            if (mesh.animNormals != NULL)
+            {
+                mesh.animNormals[vCounter] = 0;
+                mesh.animNormals[vCounter + 1] = 0;
+                mesh.animNormals[vCounter + 2] = 0;
+            }
+
+            // Iterates over 4 bones per vertex
+            for (int j = 0; j < 4; j++, boneCounter++)
+            {
+                boneWeight = mesh.boneWeights[boneCounter];
+
+                // Early stop when no transformation will be applied
+                if (boneWeight == 0.0f) continue;
+
+                boneId = mesh.boneIds[boneCounter];
+
+                bindTransform = model.bindPose[boneId];
+                newTransform = inPose->modelSpaceTransforms[boneId];
+
+                // Vertices processing
+                // NOTE: We use meshes.vertices (default vertex position) to calculate meshes.animVertices (animated vertex position)
+                newVertex = (Vector3){ mesh.vertices[vCounter], mesh.vertices[vCounter + 1], mesh.vertices[vCounter + 2] };
+
+                // Inverse Bind
+                newVertex = VertexTransformInverse(newVertex, model.bindPose[boneId]);
+
+                // Apply Pose
+                newVertex = VertexTransform(newVertex, newTransform);
+
+                //animVertex = Vector3Transform(animVertex, model.transform);
+                mesh.animVertices[vCounter] += newVertex.x * boneWeight;
+                mesh.animVertices[vCounter + 1] += newVertex.y * boneWeight;
+                mesh.animVertices[vCounter + 2] += newVertex.z * boneWeight;
+                updated = true;
+
+                // Normals processing
+                // NOTE: We use meshes.baseNormals (default normal) to calculate meshes.normals (animated normals)
+                if (mesh.normals != NULL)
+                {
+                    newNormal = (Vector3){ mesh.normals[vCounter], mesh.normals[vCounter + 1], mesh.normals[vCounter + 2] };
+                    newNormal = Vector3RotateByQuaternion(newNormal, QuaternionMultiply(newTransform.rotation, QuaternionInvert(bindTransform.rotation)));
+                    mesh.animNormals[vCounter] += newNormal.x * boneWeight;
+                    mesh.animNormals[vCounter + 1] += newNormal.y * boneWeight;
+                    mesh.animNormals[vCounter + 2] += newNormal.z * boneWeight;
+                }
+            }
+        }
+
+        // Upload new vertex data to GPU for model drawing
+        // NOTE: Only update data when values changed
+        if (updated)
+        {
+            rlUpdateVertexBuffer(mesh.vboId[0], mesh.animVertices, mesh.vertexCount * 3 * sizeof(float), 0); // Update vertex position
+            rlUpdateVertexBuffer(mesh.vboId[2], mesh.animNormals, mesh.vertexCount * 3 * sizeof(float), 0);  // Update vertex normals
+        }
+    }
 }
 
 // Update model animated bones transform matrices for a given frame
@@ -2411,9 +2671,14 @@ void UnloadModelAnimations(ModelAnimation *animations, int animCount)
 void UnloadModelAnimation(ModelAnimation anim)
 {
     for (int i = 0; i < anim.frameCount; i++) RL_FREE(anim.framePoses[i]);
-
     RL_FREE(anim.bones);
     RL_FREE(anim.framePoses);
+
+    if (anim.localPosesExists)
+    {
+        for (int i = 0; i < anim.frameCount; i++) RL_FREE(anim.localPoses[i]);
+        RL_FREE(anim.localPoses);
+    }
 }
 
 // Check model animation skeleton match
@@ -5553,7 +5818,8 @@ static Model LoadGLTF(const char *fileName)
                                 float *vertices = model.meshes[meshIndex].vertices;
                                 for (unsigned int k = 0; k < attribute->count; k++)
                                 {
-                                    Vector3 vt = Vector3Transform((Vector3){ vertices[3*k], vertices[3*k+1], vertices[3*k+2] }, worldMatrix);
+                                    //Vector3 vt = Vector3Transform((Vector3){ vertices[3*k], vertices[3*k+1], vertices[3*k+2] }, worldMatrix);
+                                    Vector3 vt = (Vector3){ vertices[3*k], vertices[3*k+1], vertices[3*k+2] }; // CUSTOM
                                     vertices[3*k] = vt.x;
                                     vertices[3*k+1] = vt.y;
                                     vertices[3*k+2] = vt.z;
@@ -6205,6 +6471,8 @@ static bool GetPoseAtTimeGLTF(cgltf_interpolation_type interpolationType, cgltf_
 
 #define GLTF_ANIMDELAY 17    // Animation frames delay, (~1000 ms/60 FPS = 16.666666* ms)
 
+#define ANIM_MAX_SAMPLER
+
 static ModelAnimation *LoadModelAnimationsGLTF(const char *fileName, int *animCount)
 {
     // glTF file loading
@@ -6250,6 +6518,37 @@ static ModelAnimation *LoadModelAnimationsGLTF(const char *fileName, int *animCo
                     cgltf_animation_channel *scale;
                     cgltf_interpolation_type interpolationType;
                 };
+
+#ifdef ANIM_MAX_SAMPLER
+                float min = FLT_MAX;
+                float max = -1;
+                cgltf_size numFrames = 0;
+                int maxChannel = -1;
+                for (unsigned int j = 0; j < animData.channels_count; j++)
+                {
+                    if (numFrames < animData.channels[j].sampler->input->count)
+                    {
+                        numFrames = animData.channels[j].sampler->input->count;
+                        maxChannel = j;
+                    }
+
+                    if (animData.channels[j].sampler->input->has_min)
+                    {
+                        if (animData.channels[j].sampler->input->min[0] < min)
+                        {
+                            min = animData.channels[j].sampler->input->min[0];
+                        }
+                    }
+
+                    if (animData.channels[j].sampler->input->has_max)
+                    {
+                        if (animData.channels[j].sampler->input->max[0] > max)
+                        {
+                            max = animData.channels[j].sampler->input->max[0];
+                        }
+                    }
+                }
+#endif
 
                 struct Channels *boneChannels = (struct Channels *)RL_CALLOC(animations[i].boneCount, sizeof(struct Channels));
                 float animDuration = 0.0f;
@@ -6311,13 +6610,25 @@ static ModelAnimation *LoadModelAnimationsGLTF(const char *fileName, int *animCo
 
                 if (animData.name != NULL) strncpy(animations[i].name, animData.name, sizeof(animations[i].name) - 1);
 
+#ifdef ANIM_MAX_SAMPLER
+                animations[i].frameCount = animData.channels[maxChannel].sampler->input->count;
+#else
                 animations[i].frameCount = (int)(animDuration*1000.0f/GLTF_ANIMDELAY) + 1;
+#endif
                 animations[i].framePoses = (Transform **)RL_MALLOC(animations[i].frameCount*sizeof(Transform *));
+                animations[i].localPoses = (Transform **)RL_MALLOC(animations[i].frameCount*sizeof(Transform *));
 
                 for (int j = 0; j < animations[i].frameCount; j++)
                 {
                     animations[i].framePoses[j] = (Transform *)RL_MALLOC(animations[i].boneCount*sizeof(Transform));
-                    float time = ((float) j*GLTF_ANIMDELAY)/1000.0f;
+                    animations[i].localPoses[j] = (Transform *)RL_MALLOC(animations[i].boneCount*sizeof(Transform)); // CUSTOM
+                    
+#ifdef ANIM_MAX_SAMPLER
+                    float time;
+                    cgltf_accessor_read_float(animData.channels[maxChannel].sampler->input, j, &time, 1);
+#else
+                    float time = ((float)j * GLTF_ANIMDELAY) / 1000.0f;
+#endif
 
                     for (int k = 0; k < animations[i].boneCount; k++)
                     {
@@ -6354,9 +6665,49 @@ static ModelAnimation *LoadModelAnimationsGLTF(const char *fileName, int *animCo
                             .rotation = rotation,
                             .scale = scale
                         };
+                        // CUSTOM
+                        animations[i].localPoses[j][k] = (Transform){
+                            .translation = translation,
+                            .rotation = rotation,
+                            .scale = scale
+                        };
                     }
 
-                    BuildPoseFromParentJoints(animations[i].bones, animations[i].boneCount, animations[i].framePoses[j]);
+                    //BuildPoseFromParentJoints(animations[i].bones, animations[i].boneCount, animations[i].framePoses[j]);
+                    // CUSTOM
+                    Transform modelToWorldTransform;
+                    {
+                        cgltf_float cgltf_worldTransform[16];
+                        cgltf_node* node = skin.joints[0];
+                        cgltf_node_transform_world(node->parent, cgltf_worldTransform);
+                        Matrix worldMatrix = {
+                            cgltf_worldTransform[0], cgltf_worldTransform[4], cgltf_worldTransform[8], cgltf_worldTransform[12],
+                            cgltf_worldTransform[1], cgltf_worldTransform[5], cgltf_worldTransform[9], cgltf_worldTransform[13],
+                            cgltf_worldTransform[2], cgltf_worldTransform[6], cgltf_worldTransform[10], cgltf_worldTransform[14],
+                            cgltf_worldTransform[3], cgltf_worldTransform[7], cgltf_worldTransform[11], cgltf_worldTransform[15]
+                        };
+                        MatrixDecompose(worldMatrix, &(modelToWorldTransform.translation), &(modelToWorldTransform.rotation), &(modelToWorldTransform.scale));
+                    }
+
+                    for (int k = 0; k < animations[i].boneCount; k++)
+                    {
+                        // Bones are in hierarchical order, we are guaranteed the parent has already been evaluated
+                        int parentIdx = animations[i].bones[k].parent;
+                        Transform* p_modelTransform = &animations[i].framePoses[j][k];
+                        Transform* p_localTransform = &animations[i].localPoses[j][k];
+                        Transform* p_parentModelTransform = &animations[i].framePoses[j][parentIdx];
+
+                        if (k == 0) 
+                        {
+                            *p_modelTransform = ComposeTransform(*p_modelTransform, modelToWorldTransform);
+                            *p_localTransform = *p_modelTransform;
+                        }
+                        else 
+                        {
+                            *p_modelTransform = ComposeTransform(*p_modelTransform, *p_parentModelTransform);
+                            *p_localTransform = ComposeTransformInverse(*p_modelTransform, *p_parentModelTransform);
+                        }
+                    }
                 }
 
                 TRACELOG(LOG_INFO, "MODEL: [%s] Loaded animation: %s (%d frames, %fs)", fileName, (animData.name != NULL)? animData.name : "NULL", animations[i].frameCount, animDuration);
