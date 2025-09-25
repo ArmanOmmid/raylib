@@ -4526,9 +4526,10 @@ static void BuildPoseFromParentJoints(BoneInfo *bones, int boneCount, Transform 
                 continue;
             }
             transforms[i].rotation = QuaternionMultiply(transforms[bones[i].parent].rotation, transforms[i].rotation);
+            transforms[i].scale = Vector3Multiply(transforms[i].scale, transforms[bones[i].parent].scale);
+            transforms[i].translation = Vector3Multiply(transforms[i].translation, transforms[bones[i].parent].scale);
             transforms[i].translation = Vector3RotateByQuaternion(transforms[i].translation, transforms[bones[i].parent].rotation);
             transforms[i].translation = Vector3Add(transforms[i].translation, transforms[bones[i].parent].translation);
-            transforms[i].scale = Vector3Multiply(transforms[i].scale, transforms[bones[i].parent].scale);
         }
     }
 }
@@ -5818,8 +5819,8 @@ static Model LoadGLTF(const char *fileName)
                                 float *vertices = model.meshes[meshIndex].vertices;
                                 for (unsigned int k = 0; k < attribute->count; k++)
                                 {
-                                    //Vector3 vt = Vector3Transform((Vector3){ vertices[3*k], vertices[3*k+1], vertices[3*k+2] }, worldMatrix);
-                                    Vector3 vt = (Vector3){ vertices[3*k], vertices[3*k+1], vertices[3*k+2] }; // CUSTOM
+                                    Vector3 vt = Vector3Transform((Vector3){ vertices[3*k], vertices[3*k+1], vertices[3*k+2] }, worldMatrix);
+                                    //Vector3 vt = (Vector3){ vertices[3*k], vertices[3*k+1], vertices[3*k+2] }; // CUSTOM
                                     vertices[3*k] = vt.x;
                                     vertices[3*k+1] = vt.y;
                                     vertices[3*k+2] = vt.z;
@@ -6471,7 +6472,7 @@ static bool GetPoseAtTimeGLTF(cgltf_interpolation_type interpolationType, cgltf_
 
 #define GLTF_ANIMDELAY 17    // Animation frames delay, (~1000 ms/60 FPS = 16.666666* ms)
 
-#define ANIM_MAX_SAMPLER
+//#define ANIM_MAX_SAMPLER
 
 static ModelAnimation *LoadModelAnimationsGLTF(const char *fileName, int *animCount)
 {
@@ -6505,6 +6506,21 @@ static ModelAnimation *LoadModelAnimationsGLTF(const char *fileName, int *animCo
             cgltf_skin skin = data->skins[0];
             *animCount = (int)data->animations_count;
             animations = (ModelAnimation *)RL_CALLOC(data->animations_count, sizeof(ModelAnimation));
+
+            // CUSTOM
+            Transform worldTransform;
+            {
+                cgltf_float cgltf_worldTransform[16];
+                cgltf_node* node = skin.joints[0];
+                cgltf_node_transform_world(node->parent, cgltf_worldTransform);
+                Matrix worldMatrix = {
+                    cgltf_worldTransform[0], cgltf_worldTransform[4], cgltf_worldTransform[8], cgltf_worldTransform[12],
+                    cgltf_worldTransform[1], cgltf_worldTransform[5], cgltf_worldTransform[9], cgltf_worldTransform[13],
+                    cgltf_worldTransform[2], cgltf_worldTransform[6], cgltf_worldTransform[10], cgltf_worldTransform[14],
+                    cgltf_worldTransform[3], cgltf_worldTransform[7], cgltf_worldTransform[11], cgltf_worldTransform[15]
+                };
+                MatrixDecompose(worldMatrix, &(worldTransform.translation), &(worldTransform.rotation), &(worldTransform.scale));
+            }
 
             for (unsigned int i = 0; i < data->animations_count; i++)
             {
@@ -6673,39 +6689,40 @@ static ModelAnimation *LoadModelAnimationsGLTF(const char *fileName, int *animCo
                         };
                     }
 
-                    //BuildPoseFromParentJoints(animations[i].bones, animations[i].boneCount, animations[i].framePoses[j]);
-                    // CUSTOM
-                    Transform modelToWorldTransform;
+                    bool custom = false;
+
+                    if (!custom)
                     {
-                        cgltf_float cgltf_worldTransform[16];
-                        cgltf_node* node = skin.joints[0];
-                        cgltf_node_transform_world(node->parent, cgltf_worldTransform);
-                        Matrix worldMatrix = {
-                            cgltf_worldTransform[0], cgltf_worldTransform[4], cgltf_worldTransform[8], cgltf_worldTransform[12],
-                            cgltf_worldTransform[1], cgltf_worldTransform[5], cgltf_worldTransform[9], cgltf_worldTransform[13],
-                            cgltf_worldTransform[2], cgltf_worldTransform[6], cgltf_worldTransform[10], cgltf_worldTransform[14],
-                            cgltf_worldTransform[3], cgltf_worldTransform[7], cgltf_worldTransform[11], cgltf_worldTransform[15]
-                        };
-                        MatrixDecompose(worldMatrix, &(modelToWorldTransform.translation), &(modelToWorldTransform.rotation), &(modelToWorldTransform.scale));
+                        Transform* root = &animations[i].framePoses[j][0];
+                        root->rotation = QuaternionMultiply(worldTransform.rotation, root->rotation);
+                        root->scale = Vector3Multiply(root->scale, worldTransform.scale);
+                        root->translation = Vector3Multiply(root->translation, worldTransform.scale);
+                        root->translation = Vector3RotateByQuaternion(root->translation, worldTransform.rotation);
+                        root->translation = Vector3Add(root->translation, worldTransform.translation);
+
+                        BuildPoseFromParentJoints(animations[i].bones, animations[i].boneCount, animations[i].framePoses[j]);
                     }
 
-                    for (int k = 0; k < animations[i].boneCount; k++)
+                    if (custom)
                     {
-                        // Bones are in hierarchical order, we are guaranteed the parent has already been evaluated
-                        int parentIdx = animations[i].bones[k].parent;
-                        Transform* p_modelTransform = &animations[i].framePoses[j][k];
-                        Transform* p_localTransform = &animations[i].localPoses[j][k];
-                        Transform* p_parentModelTransform = &animations[i].framePoses[j][parentIdx];
+                        for (int k = 0; k < animations[i].boneCount; k++)
+                        {
+                            // Bones are in hierarchical order, we are guaranteed the parent has already been evaluated
+                            int parentIdx = animations[i].bones[k].parent;
+                            Transform* p_modelTransform = &animations[i].framePoses[j][k];
+                            Transform* p_localTransform = &animations[i].localPoses[j][k];
 
-                        if (k == 0) 
-                        {
-                            *p_modelTransform = ComposeTransform(*p_modelTransform, modelToWorldTransform);
-                            *p_localTransform = *p_modelTransform;
-                        }
-                        else 
-                        {
-                            *p_modelTransform = ComposeTransform(*p_modelTransform, *p_parentModelTransform);
-                            *p_localTransform = ComposeTransformInverse(*p_modelTransform, *p_parentModelTransform);
+                            if (k == 0)
+                            {
+                                *p_modelTransform = ComposeTransform(*p_modelTransform, worldTransform);
+                                *p_localTransform = *p_modelTransform;
+                            }
+                            else
+                            {
+                                Transform* p_parentModelTransform = &animations[i].framePoses[j][parentIdx];
+                                *p_modelTransform = ComposeTransform(*p_modelTransform, *p_parentModelTransform);
+                                *p_localTransform = ComposeTransformInverse(*p_modelTransform, *p_parentModelTransform);
+                            }
                         }
                     }
                 }
