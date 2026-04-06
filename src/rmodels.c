@@ -41,6 +41,9 @@
 *
 **********************************************************************************************/
 
+#define GLTF_CUSTOM_NO_WORLD
+#define GLTF_CUSTOM_SAMPLER
+
 #include "raylib.h"         // Declares module functions
 
 #include "config.h"         // Defines module configuration flags
@@ -5704,7 +5707,11 @@ static Model LoadGLTF(const char *fileName)
                                 float *vertices = model.meshes[meshIndex].vertices;
                                 for (unsigned int k = 0; k < attribute->count; k++)
                                 {
+#ifdef GLTF_CUSTOM_NO_WORLD
+                                    Vector3 vt = (Vector3){ vertices[3*k], vertices[3*k+1], vertices[3*k+2] }; // CUSTOM
+#else
                                     Vector3 vt = Vector3Transform((Vector3){ vertices[3*k], vertices[3*k+1], vertices[3*k+2] }, worldMatrix);
+#endif
                                     vertices[3*k] = vt.x;
                                     vertices[3*k+1] = vt.y;
                                     vertices[3*k+2] = vt.z;
@@ -6547,6 +6554,37 @@ static ModelAnimation *LoadModelAnimationsGLTF(const char *fileName, int *animCo
                     cgltf_interpolation_type interpolationType;
                 };
 
+#ifdef GLTF_CUSTOM_SAMPLER
+                float min = FLT_MAX;
+                float max = -1;
+                cgltf_size numFrames = 0;
+                int maxChannel = -1;
+                for (unsigned int j = 0; j < animData.channels_count; j++)
+                {
+                    if (numFrames < animData.channels[j].sampler->input->count)
+                    {
+                        numFrames = animData.channels[j].sampler->input->count;
+                        maxChannel = j;
+                    }
+
+                    if (animData.channels[j].sampler->input->has_min)
+                    {
+                        if (animData.channels[j].sampler->input->min[0] < min)
+                        {
+                            min = animData.channels[j].sampler->input->min[0];
+                        }
+                    }
+
+                    if (animData.channels[j].sampler->input->has_max)
+                    {
+                        if (animData.channels[j].sampler->input->max[0] > max)
+                        {
+                            max = animData.channels[j].sampler->input->max[0];
+                        }
+                    }
+                }
+#endif
+
                 struct Channels *boneChannels = (struct Channels *)RL_CALLOC(animations[a].boneCount, sizeof(struct Channels));
                 float animDuration = 0.0f;
 
@@ -6603,13 +6641,22 @@ static ModelAnimation *LoadModelAnimationsGLTF(const char *fileName, int *animCo
 
                 if (animData.name != NULL) strncpy(animations[a].name, animData.name, sizeof(animations[a].name) - 1);
 
+#ifdef GLTF_CUSTOM_SAMPLER
+                animations[a].keyframeCount = animData.channels[maxChannel].sampler->input->count;
+#else
                 animations[a].keyframeCount = (int)(animDuration*GLTF_FRAMERATE) + 1;
+#endif
                 animations[a].keyframePoses = (Transform **)RL_CALLOC(animations[a].keyframeCount, sizeof(Transform *));
 
                 for (int j = 0; j < animations[a].keyframeCount; j++)
                 {
                     animations[a].keyframePoses[j] = (Transform *)RL_CALLOC(animations[a].boneCount, sizeof(Transform));
+#ifdef GLTF_CUSTOM_SAMPLER
+                    float time;
+                    cgltf_accessor_read_float(animData.channels[maxChannel].sampler->input, j, &time, 1);
+#else
                     float time = (float)j / GLTF_FRAMERATE;
+#endif
 
                     for (int k = 0; k < animations[a].boneCount; k++)
                     {
